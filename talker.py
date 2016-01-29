@@ -17,6 +17,9 @@ import argparse
 import telegram
 import time
 import sys
+import threading
+import random
+import signal
 from markov.database import MarkovDatabase
 
 # Delay to wait before reattempting.
@@ -31,6 +34,7 @@ parser.add_argument("--database",
                     default="observer.db",
                     nargs=1,
                     help="The path to the SQLite database used to load the generated chains. Default is observer.db.")
+parser.add_argument("--parallel-chat", type=int, help="The chat ID to post into when SIGUSR1 is obtained.")
 
 args = parser.parse_args()
 bot = telegram.Bot(token=args.token)
@@ -50,6 +54,28 @@ def format_word(word):
         return word[1:]
     return word
 
+def generate_message(db, user):
+    generated = " ".join(format_word(w) for w in db.generate_message(user))
+    if args.monospace:
+        generated = "`" + generated + "`"
+    return generated
+
+def should_respond(message):
+    """Returns True if the bot should respond to the given message."""
+    return ("@" + me.username) in message or message.startswith(command)
+
+
+# When we receive SIGUSR1, interpret this as a notification from the observer
+# that we should talk.
+if args.parallel_chat:
+    def parallel_handler(signum, stack):
+        try:
+            bot.sendMessage(args.parallel_chat, generate_message(db, user), parse_mode="Markdown")
+        except telegram.error.TelegramError:
+            pass
+
+    signal.signal(signal.SIGUSR1, parallel_handler)
+
 next_update = 0
 while True:
     try:
@@ -63,12 +89,10 @@ while True:
     for update in updates:
         next_update = update.update_id + 1
         message = update.message
-        if not message or not message.text or not message.text.startswith(command):
+        if not message or not message.text or not should_respond(message.text):
             continue
 
-        generated = " ".join(format_word(w) for w in db.generate_message(user))
-        if args.monospace:
-            generated = "`" + generated + "`"
+        generated = generate_message(db, user)
 
         try:
             bot.sendMessage(message.chat.id, generated, parse_mode="Markdown")
